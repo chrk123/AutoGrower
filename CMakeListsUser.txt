@@ -1,0 +1,5 @@
+FILE(GLOB EXTRA_LIB_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/.pio/libdeps/uno/*
+)
+
+include_directories(${EXTRA_LIB_SOURCES})
