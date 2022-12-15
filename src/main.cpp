@@ -1,110 +1,72 @@
 #include <Arduino.h>
 #include <LiquidCrystal_I2C.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
+#include <Encoder.h>
 
-int clamp(int val, int min, int max) {
-    return val < min ? min
-                     : val > max ? max : val;
-}
-
-float normalize(int val, int min, int max) {
-    val = clamp(val, min, max);
-    return (val - min) / static_cast<float>(max - min);
-}
-
-class Relay {
-public:
-    explicit Relay(uint8_t digital_out) : m_Pin{digital_out} {
-        pinMode(m_Pin, OUTPUT);
-    }
-
-    void on() const {
-        digitalWrite(m_Pin, HIGH);
-    }
-
-    void off() const {
-        digitalWrite(m_Pin, LOW);
-    }
-
-private:
-    uint8_t m_Pin;
-};
-
-class TemperatureSensor {
-public:
-    explicit TemperatureSensor(uint8_t digital_in) : m_Wire{digital_in}, m_Sensors{&m_Wire} {
-        m_Sensors.begin();
-    }
-
-    float read() {
-        m_Sensors.requestTemperatures();
-        return m_Sensors.getTempCByIndex(0);
-    }
-
-private:
-    OneWire m_Wire;
-    DallasTemperature m_Sensors;
-};
-
-class MoistureSensor {
-public:
-    explicit MoistureSensor(uint8_t analog_in) : m_AnalogIn(analog_in) {
-
-    }
-
-    float read() const {
-        return 1 - normalize(analogRead(m_AnalogIn), m_ReadingInWater, m_ReadingInAir);
-    }
-
-private:
-    uint8_t m_AnalogIn;
-    int m_ReadingInAir{827};
-    int m_ReadingInWater{423};
-};
+#include "StateContext.h"
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
+Encoder encoder{2, 3};
+StateContext context{lcd, 25, 0.5};
 
-MoistureSensor moistureSensor{0};
-TemperatureSensor tempSensor{4};
+volatile bool clicked = false;
+ISR (PCINT2_vect) {
+    clicked = digitalRead(7);
+}
 
-Relay pump{13};
-Relay heat{12};
+long last_value = -999;
+enum class RotationDirection {
+    None,
+    Clockwise,
+    Counterclockwise
+};
+
+RotationDirection GetRotation() {
+    auto const current_reading = encoder.read();
+    if (current_reading == last_value)
+        return RotationDirection::None;
+
+    auto ret = current_reading > last_value ? RotationDirection::Clockwise : RotationDirection::Counterclockwise;
+    last_value = current_reading;
+    delay(10);
+    return ret;
+}
 
 void setup() {
+    pinMode(0, INPUT_PULLUP);
+    pinMode(1, INPUT_PULLUP);
+    pinMode(5, INPUT_PULLUP);
+    pinMode(6, INPUT_PULLUP);
+    pinMode(8, INPUT_PULLUP);
+    pinMode(9, INPUT_PULLUP);
+    pinMode(10, INPUT_PULLUP);
+    pinMode(13, INPUT_PULLUP);
+
     lcd.init();
     lcd.backlight();
     Serial.begin(9600);
+
+    pinMode(7, INPUT);
+    *digitalPinToPCMSK(7) |= bit (digitalPinToPCMSKbit(7));  // enable pin
+    PCIFR |= bit (digitalPinToPCICRbit(7)); // clear any outstanding interrupt
+    PCICR |= bit (digitalPinToPCICRbit(7)); // enable interrupt for the group
+
+    delay(1000);
 }
 
 void loop() {
-    lcd.clear();
+    auto const rot = GetRotation();
 
-    auto const temperature = tempSensor.read();
-    lcd.setCursor(0, 0);
-    lcd.print("temp: ");
-    lcd.print(temperature);
-    lcd.print(static_cast<char>(223));
-    lcd.print("C");
-
-
-    auto const moisture = moistureSensor.read();
-    lcd.setCursor(0, 1);
-    lcd.print("moisture: ");
-    lcd.print(moisture * 100);
-    lcd.print("%");
-
-    if (temperature < 25) {
-        heat.on();
+    if (clicked) {
+        noInterrupts();
+        context.handleClick();
+        clicked = false;
+        interrupts();
+    } else if (rot == RotationDirection::Counterclockwise) {
+        context.handleLeft();
+    } else if (rot == RotationDirection::Clockwise) {
+        context.handleRight();
     } else {
-        heat.off();
+        context.run();
     }
-
-    if (moisture < 0.25) {
-        pump.on();
-    } else {
-        pump.off();
-    }
-
-    delay(2000);
+    delay(200);
 }
